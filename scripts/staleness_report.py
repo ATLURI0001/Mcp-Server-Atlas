@@ -1,0 +1,336 @@
+#!/usr/bin/env python3
+"""Health report for every GitHub repository on the list.
+
+Groups entries into what needs action: gone (404), moved, archived, unlicensed,
+and stale. Hosted (`Remote`) entries skip the licence and stale buckets, as they
+skip those checks at submission, and have their endpoint probed instead. Written
+to be run on a schedule and piped into a single tracking issue, so the report
+replaces itself instead of accumulating noise.
+
+    python scripts/staleness_report.py > report.md
+
+Set GITHUB_TOKEN to raise the API rate limit from 60 to 5000 requests/hour.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import sys
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+
+# Same directory, so this resolves when the script is run as `python
+# scripts/staleness_report.py`. The licence rule lives in one place: a report that
+# judged a manifest licence differently from the submission gate would send the
+# maintainer after entries the gate accepts. The hosted-server rule is shared the
+# same way: an endpoint probe here is the submission gate's own.
+from check_submission import (
+    GH_REPO_RE,
+    REMOTE,
+    REMOTE_REVIEW,
+    inspect,
+    is_open_source,
+    manifest_licence,
+    parse_rows,
+)
+
+README = Path(__file__).resolve().parent.parent / "README.md"
+API = "https://api.github.com/graphql"
+STALE_DAYS = 180
+BATCH = 50
+
+# Matches an entry link and stops at the first path separator, so an entry that
+# points into a subdirectory -- `.../getzep/graphiti/tree/main/mcp_server` -- still
+# resolves to its parent repository instead of being skipped. Requiring a bare
+# `owner/repo)` left 11 of the repositories behind the list unchecked, measured by
+# running both forms over README.md.
+ENTRY_RE = re.compile(
+    r"\[(?P<name>[^\]]+)\]\(https://github\.com/(?P<owner>[\w.-]+)/(?P<repo>[\w.-]+)(?:[/)]|$)"
+)
+
+# This repository's own links (the CI badge, the issue links) are not entries.
+SELF_SLUG = "atluri0001/mcp-server-atlas"
+
+
+def graphql(query: str):
+    token = os.environ.get("GITHUB_TOKEN")
+    if not token:
+        sys.exit("error: GITHUB_TOKEN is required for the GraphQL API")
+    req = urllib.request.Request(
+        API,
+        data=json.dumps({"query": query}).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "User-Agent": "mcp-server-atlas-staleness",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def collect():
+    """Return (name, owner, repo, section) for every GitHub entry, deduplicated."""
+    section = None
+    seen = set()
+    out = []
+    for line in README.read_text(encoding="utf-8").splitlines():
+        # One fixed whitespace character, not `\s+`: `.` matches whitespace too,
+        # so `\s+(.*)` overlaps and backtracks super-linearly. Strip in Python.
+        m = re.match(r"^#{2,3}\s(.*)$", line)
+        if m:
+            section = m.group(1).strip()
+            continue
+        for e in ENTRY_RE.finditer(line):
+            slug = f"{e.group('owner')}/{e.group('repo')}"
+            if slug.lower() == SELF_SLUG or slug.lower() in seen:
+                continue
+            seen.add(slug.lower())
+            out.append(
+                (e.group("name"), e.group("owner"), e.group("repo"), section or "?")
+            )
+    return out
+
+
+def fetch(entries):
+    results = {}
+    for start in range(0, len(entries), BATCH):
+        chunk = entries[start : start + BATCH]
+        parts = [
+            f'r{i}: repository(owner: "{o}", name: "{r}") '
+            f"{{ nameWithOwner stargazerCount pushedAt isArchived licenseInfo {{ spdxId }} }}"
+            for i, (_, o, r, _) in enumerate(chunk)
+        ]
+        data = graphql("query{" + " ".join(parts) + "}")
+        payload = data.get("data") or {}
+        for i, entry in enumerate(chunk):
+            results[entry] = payload.get(f"r{i}")
+    return results
+
+
+def remote_entries() -> list:
+    """Every `Remote` row, parsed the way the submission gate parses it."""
+    rows = parse_rows(README.read_text(encoding="utf-8"))
+    return [sub for sub in rows.values() if sub.third == REMOTE]
+
+
+def remote_slugs(subs: list) -> set:
+    """Lowercased `owner/repo` for the hosted entries that link a repository."""
+    return {
+        f"{m.group('owner')}/{m.group('repo')}".lower()
+        for sub in subs
+        if (m := GH_REPO_RE.match(sub.url))
+    }
+
+
+def check_hosted(subs: list) -> list:
+    """(name, url, findings) for each hosted entry the gate would not pass cleanly.
+
+    The standing note that every `Remote` entry gets a maintainer's review is left
+    out: it is the rule itself, not something wrong with an entry.
+    """
+    flagged = []
+    for sub in subs:
+        inspect(sub)
+        findings = sub.hard + [note for note in sub.soft if note != REMOTE_REVIEW]
+        if findings:
+            flagged.append((sub.name, sub.url, findings))
+    return flagged
+
+
+def classify(results, now, remote: frozenset | set = frozenset()) -> dict:
+    """Sort the API results into the buckets the report is organised around.
+
+    A repository in `remote` is a hosted server's documentation, so it is not
+    judged on its licence or its last push.
+    """
+    buckets = {"gone": [], "archived": [], "stale": [], "moved": [], "no_licence": []}
+    for entry, info in results.items():
+        name, owner, repo, section = entry
+        slug = f"{owner}/{repo}"
+        if info is None:
+            buckets["gone"].append((name, slug, section))
+            continue
+        # GitHub serves a renamed or transferred repository over a redirect, so the
+        # listed URL keeps working right up until someone claims the old name.
+        if info["nameWithOwner"].lower() != slug.lower():
+            buckets["moved"].append((name, slug, info["nameWithOwner"], section))
+        pushed = datetime.fromisoformat(info["pushedAt"].replace("Z", "+00:00"))
+        days = (now - pushed).days
+        licence = (info.get("licenseInfo") or {}).get("spdxId")
+        if info["isArchived"]:
+            buckets["archived"].append((name, slug, section, days))
+        if slug.lower() in remote:
+            continue
+        if licence in (None, "", "NOASSERTION"):
+            buckets["no_licence"].append(
+                (name, slug, section, licence or "none", info["stargazerCount"])
+            )
+        if days > STALE_DAYS and not info["isArchived"]:
+            buckets["stale"].append((days, name, slug, section, info["stargazerCount"]))
+    return buckets
+
+
+def resolve_manifest_licences(no_root_licence) -> tuple[list, list]:
+    """Split repositories with no root LICENSE into manifest-licensed and unlicensed.
+
+    GitHub reads the root `LICENSE` file only, so a project that declares its
+    licence in a package manifest arrives here reporting `none`. CONTRIBUTING.md
+    accepts that declaration, so read the manifest instead of asking a maintainer
+    to do it by hand.
+    """
+    manifest_licensed, unlicensed = [], []
+    for name, slug, section, licence, stars in no_root_licence:
+        man_file, man_lic = (
+            (None, None) if licence != "none" else manifest_licence(slug)
+        )
+        if man_lic and is_open_source(man_lic):
+            manifest_licensed.append((name, slug, section, man_lic, man_file, stars))
+        elif man_lic:
+            unlicensed.append((name, slug, section, f"{man_lic} in {man_file}", stars))
+        else:
+            unlicensed.append((name, slug, section, licence, stars))
+    return manifest_licensed, unlicensed
+
+
+def section_block(
+    title: str, intro: str, header: str, divider: str, rows: list
+) -> list:
+    """One report section, or nothing at all when the bucket is empty."""
+    if not rows:
+        return []
+    return [f"## {title}", "", intro, "", header, divider, *rows, ""]
+
+
+def main() -> int:
+    entries = collect()
+    results = fetch(entries)
+    now = datetime.now(timezone.utc)
+    hosted_subs = remote_entries()
+
+    buckets = classify(results, now, remote_slugs(hosted_subs))
+    gone = buckets["gone"]
+    archived = buckets["archived"]
+    stale = buckets["stale"]
+    moved = buckets["moved"]
+    manifest_licensed, unlicensed = resolve_manifest_licences(buckets["no_licence"])
+    hosted = check_hosted(hosted_subs)
+
+    checked = len(entries)
+    out = [
+        f"Automated health check of the {checked} GitHub repositories behind the entries "
+        f"in `README.md`, plus the endpoints of the {len(hosted_subs)} hosted (`Remote`) "
+        f"entries. Other entries hosted elsewhere are covered only by the lychee link "
+        f"check in `.github/workflows/lint.yml`.",
+        "",
+        f"- **{len(gone)}** gone (404 -- deleted or made private)",
+        f"- **{len(moved)}** reachable only through a rename or transfer redirect",
+        f"- **{len(archived)}** archived upstream",
+        f"- **{len(unlicensed)}** with no licence the automated checks can find",
+        f"- **{len(stale)}** not pushed in over {STALE_DAYS} days",
+        f"- **{len(hosted)}** hosted entries whose endpoint or documentation needs a look",
+        f"- **{len(manifest_licensed)}** licensed in a package manifest rather than a "
+        f"root `LICENSE` file, which CONTRIBUTING.md accepts (listed for information, "
+        f"no action needed)",
+        "",
+        "This issue is rewritten in place on every run, so it always reflects the current state.",
+        "",
+    ]
+
+    out += section_block(
+        "Gone: remove these",
+        "These URLs 404. Per CONTRIBUTING.md they should be removed.",
+        "| Entry | Repo | Section |",
+        "|-------|------|---------|",
+        [f"| {n} | `{s}` | {sec} |" for n, s, sec in sorted(gone)],
+    )
+
+    out += section_block(
+        "Moved: update the URL",
+        "These resolve through a redirect, which only holds while the old name stays "
+        "unclaimed. Rewrite the URL, and check the entry name and description too if "
+        "the project was renamed rather than just transferred.",
+        "| Entry | Listed as | Now | Section |",
+        "|-------|-----------|-----|---------|",
+        [
+            f"| {n} | `{s}` | `{actual}` | {sec} |"
+            for n, s, actual, sec in sorted(moved)
+        ],
+    )
+
+    out += section_block(
+        "Archived upstream",
+        "The maintainer has archived these. Remove them, or note them as unmaintained.",
+        "| Entry | Repo | Section | Last push |",
+        "|-------|------|---------|-----------|",
+        [f"| {n} | `{s}` | {sec} | {d}d ago |" for n, s, sec, d in sorted(archived)],
+    )
+
+    out += section_block(
+        f"Stale: no push in over {STALE_DAYS} days",
+        "Not automatically disqualifying -- a finished, working server can sit still. "
+        "Check whether each still works against the current MCP spec.",
+        "| Days | Entry | Repo | Section | Stars |",
+        "|------|-------|------|---------|-------|",
+        [
+            f"| {d} | {n} | `{s}` | {sec} | {st} |"
+            for d, n, s, sec, st in sorted(stale, reverse=True)
+        ],
+    )
+
+    out += section_block(
+        "No recognised licence",
+        "CONTRIBUTING.md requires a clearly stated licence. `NOASSERTION` means "
+        "GitHub found a licence file it could not identify -- usually fine for a "
+        "large vendor repo, suspicious for a small one, and not automatically a "
+        "rejection. `none` means neither a root `LICENSE` file nor a licence field "
+        "in a package manifest, which is a rejection. A named value below is a "
+        "manifest field that withholds open-source terms rather than granting "
+        "them, such as npm's `UNLICENSED`.",
+        "| Entry | Repo | Section | Licence | Stars |",
+        "|-------|------|---------|---------|-------|",
+        [
+            f"| {n} | `{s}` | {sec} | {lic} | {st} |"
+            for n, s, sec, lic, st in sorted(unlicensed, key=lambda x: x[4])
+        ],
+    )
+
+    out += section_block(
+        "Hosted: endpoint or documentation needs a look",
+        "These `Remote` entries are held to the hosted-server rules in CONTRIBUTING.md "
+        "instead of the licence and 180-day ones, and were probed the way the "
+        "submission check probes a new one. An endpoint that stopped answering is a "
+        "removal. Documentation the check could not read for an endpoint needs a "
+        "person to open it.",
+        "| Entry | Link | Findings |",
+        "|-------|------|----------|",
+        [f"| {n} | {u} | {'<br>'.join(f)} |" for n, u, f in sorted(hosted)],
+    )
+
+    out += section_block(
+        "Licensed in a package manifest",
+        "No action needed. GitHub's licence API reads the root `LICENSE` file only, "
+        "so these report as unlicensed in the sidebar while declaring real terms in "
+        "a manifest. CONTRIBUTING.md accepts that.",
+        "| Entry | Repo | Section | Licence | Declared in | Stars |",
+        "|-------|------|---------|---------|-------------|-------|",
+        [
+            f"| {n} | `{s}` | {sec} | {lic} | `{f}` | {st} |"
+            for n, s, sec, lic, f, st in sorted(manifest_licensed, key=lambda x: x[5])
+        ],
+    )
+
+    if not (gone or moved or archived or stale or unlicensed or hosted):
+        out.append(
+            "Every entry is live, licensed, maintained, and unarchived. Nothing to do."
+        )
+
+    print("\n".join(out))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

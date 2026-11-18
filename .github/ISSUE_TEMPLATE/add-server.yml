@@ -1,0 +1,141 @@
+name: Suggest a server
+description: Suggest an MCP server, client, framework, or resource for the list
+title: "Add: "
+labels: ["addition"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this if you would rather not open a pull request. For a server or a
+        framework, a bot turns this form into the one-row pull request, runs the
+        same checks a contributor's pull request gets, and merges it when they pass
+        and you have starred the repository.
+        If a field breaks a rule it says why here, and editing the issue retries.
+        Other sections are added by a maintainer. Your project needs no minimum
+        stars or age, so a brand-new one is welcome here.
+
+        A hosted server with no public source is welcome too: give its Language
+        as Remote and link the operator's own documentation.
+
+        Please check [CONTRIBUTING.md](https://github.com/ATLURI0001/mcp-server-atlas/blob/main/CONTRIBUTING.md#quality-standards) first.
+        Suggestions that clearly miss the bar get closed without much discussion.
+
+  - type: input
+    id: name
+    attributes:
+      label: Name
+      placeholder: "Stripe MCP"
+    validations:
+      required: true
+
+  - type: input
+    id: url
+    attributes:
+      label: Repository or project URL
+      description: For a hosted server with no public source, the operator's documentation page.
+      placeholder: "https://github.com/org/repo"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: section
+    attributes:
+      label: Section
+      options:
+        - Servers
+        - Frameworks & Libraries
+        - Clients
+        - Official
+        - Tutorials & Articles
+        - Videos
+        - Community
+      default: 0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: category
+    attributes:
+      label: Category
+      description: Only applies to the Servers section. Pick "n/a" for anything else.
+      options:
+        - Data & Databases
+        - Developer Tools
+        - Cloud & Infrastructure
+        - Productivity
+        - Search & Knowledge
+        - Communication
+        - File Systems & Storage
+        - AI & ML
+        - Finance
+        - Monitoring & Observability
+        - Design & Creative
+        - Testing & QA
+        - Security
+        - Web Browsing & Scraping
+        - Media & Entertainment
+        - Travel & Location
+        - E-commerce
+        - Game Development
+        - IoT & Home Automation
+        - Marketing & Analytics
+        - Knowledge Management
+        - n/a
+    validations:
+      required: true
+
+  - type: input
+    id: language
+    attributes:
+      label: Language
+      description: Primary implementation language, or Remote for a hosted endpoint.
+      placeholder: "TypeScript"
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What it does, in 80 characters or fewer. State the function, not the pitch.
+      placeholder: "Stripe payments, billing and subscription management"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: affiliation
+    attributes:
+      label: Affiliation
+      description: Suggesting your own project is welcome. Not saying so is not.
+      options:
+        - I am not connected to this project
+        - I am the author or maintainer
+        - I work for the company behind it
+        - Other connection (explain below)
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: standards
+    attributes:
+      label: Quality standards
+      options:
+        - label: The repository holds a working MCP implementation, or it is a hosted server whose own documentation names the endpoint, the authentication and the tools
+          required: true
+        - label: It states an open-source licence, in a LICENSE file at the root or in its package manifest, or it is a hosted server with no public source
+          required: true
+        - label: Its README or documentation covers installation and usage
+          required: true
+        - label: It was pushed within the last 180 days and is not archived, or, for a hosted server, its endpoint answers
+          required: true
+        - label: It is not already on the list, and no other server for the same product is
+          required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: >
+        Optional. Anything that helps, such as what makes it different from a similar
+        server already listed. Your project needs no minimum stars or age, so a new or small
+        project does not need justifying.

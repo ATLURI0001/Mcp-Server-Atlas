@@ -1,0 +1,226 @@
+# Contributing to MCP Server Atlas
+
+Thanks for wanting to add to this list. **Anyone can contribute, including your own project.** That is the normal way entries get here.
+
+The list aims to be a **curated** collection of Model Context Protocol (MCP) servers, tools, and resources -- not an exhaustive one. Curated means everything on it works, is maintained, and is safe to install. It does **not** mean famous: there is no minimum star count and no minimum project age. If you shipped an MCP server last week and it runs, it belongs here.
+
+Submissions are checked, and the checks are about whether the thing is real, not whether it is popular. CI runs them automatically, so you can see exactly where you stand before a maintainer looks.
+
+## Table of Contents
+
+- [Quick start](#quick-start)
+- [Format](#format)
+- [Categories](#categories)
+- [Quality standards](#quality-standards)
+- [Hosted servers](#hosted-servers)
+- [What is not accepted](#what-is-not-accepted)
+- [Submitting your own project](#submitting-your-own-project)
+- [Pull request process](#pull-request-process)
+- [Running the checks locally](#running-the-checks-locally)
+- [Updating or removing an entry](#updating-or-removing-an-entry)
+- [Reporting issues](#reporting-issues)
+
+## Quick start
+
+1. Read [quality standards](#quality-standards) and [what is not accepted](#what-is-not-accepted). Most declined pull requests fail one of those.
+2. Fork the repo and branch off `main`.
+3. Add **one** row to the most appropriate existing category in `README.md`. Alphabetical order is preferred but not required.
+4. Run `python scripts/validate.py` and fix anything it reports.
+5. **Star the repository.** A pull request only merges itself once its author has starred.
+6. Open a pull request and fill in the template, including the affiliation question.
+
+## Format
+
+Server entries are table rows in this exact shape:
+
+```
+| [Name](URL) | Description | Language |
+```
+
+You do not need to line up the pipes with the rows around yours. The tables are padded so the list passes [awesome-lint](https://github.com/sindresorhus/awesome-lint), and a bot pads new rows after they land. Every table shares one width per column, set by the widest cell in the whole list, so padding a new row leaves the other rows alone. Only a row wider than every other one widens the tables, and that can leave an open pull request in conflict with `main`; merging `main` into your branch, keeping `main`'s version of the table plus your row, and running `python scripts/validate.py --fix` clears it, or a maintainer can.
+
+- **Name** -- the project name, as a user would recognise it. Keep it short.
+- **URL** -- a direct `https://` link to the repository or official project page. No tracking parameters, no redirect shorteners.
+- **Description** -- what it does, in **80 characters or fewer**. Start with a capital letter. No trailing period. No em-dash or en-dash; write `--` or `-` instead. Describe the function, not the pitch: "Query and optimise PostgreSQL databases" rather than "The ultimate AI-powered database companion".
+- **Language** -- the primary implementation language, one of: `TypeScript`, `JavaScript`, `Python`, `Go`, `Rust`, `Java`, `Kotlin`, `C#`, `C++`, `C`, `Ruby`, `PHP`, `Swift`, `Elixir`, `Scala`, `Dart`, `Lua`, `Shell`, `Zig`, `Multiple` for a polyglot monorepo, `Remote` for a hosted endpoint with no public source (see [hosted servers](#hosted-servers)), or `Built-in` for a server shipped inside another product.
+
+Example:
+
+```markdown
+| [Acme MCP](https://github.com/acme/mcp-server) | Acme widget and gadget API integration | TypeScript |
+```
+
+The `Clients` table uses `| Client | Description | MCP Support |`, where the third column is one of `Full`, `Tools only`, `Tools + resources`, `Partial`, or `Experimental`.
+
+The `Official`, `Tutorials & Articles`, `Videos`, and `Community` sections are bullet lists instead:
+
+```markdown
+- [Name](URL) - Description ending in a period.
+```
+
+## Categories
+
+Add your server to the most appropriate **existing** category:
+
+| Category | Scope |
+| --- | --- |
+| Data & Databases | Database connectors, warehouses, vector stores, data pipelines |
+| Developer Tools | Version control, CI, code intelligence, API tooling, MCP meta-tooling |
+| Cloud & Infrastructure | Cloud providers, PaaS, orchestration, infrastructure as code |
+| Productivity | Docs, notes, tasks, calendars, workspace suites |
+| Search & Knowledge | Search APIs, documentation retrieval, knowledge bases |
+| Communication | Chat, email, SMS, voice, video meetings |
+| File Systems & Storage | Local files, object storage, document extraction |
+| AI & ML | Model providers, inference platforms, agent memory, ML tooling |
+| Finance | Payments, accounting, market data, trading, banking |
+| Monitoring & Observability | Metrics, logs, traces, alerting, incident response |
+| Design & Creative | Design tools, image, video, audio, 3D |
+| Testing & QA | Test automation, accessibility, protocol conformance |
+| Security | Secrets, vulnerability scanning, appsec, offensive tooling |
+| Web Browsing & Scraping | Browser automation, crawlers, scrapers |
+| Media & Entertainment | Music, video, streaming, media libraries |
+| Travel & Location | Maps, transit, weather, booking, geospatial |
+| E-commerce | Storefronts, marketplaces, catalogues, fulfilment |
+| Game Development | Game engines and game platform tooling |
+| IoT & Home Automation | Smart home, device protocols, embedded |
+| Marketing & Analytics | CRM, ads, SEO, product and web analytics |
+| Knowledge Management | Personal knowledge management, note graphs, reference managers |
+
+Beyond the server categories, the list also has **Official**, **Frameworks & Libraries**, **Clients**, **Tutorials & Articles**, **Videos**, and **Community**.
+
+**New categories need an issue first.** Open one describing what does not fit and roughly how many existing entries would move. Do not add a category in a pull request -- CI rejects unknown headings, because the category list lives in `scripts/validate.py`.
+
+### Alphabetical order
+
+Tables are kept alphabetical by name, case-insensitively and ignoring leading punctuation. This is a **preference, not a gate**: putting a row in the wrong place produces a note, never a failing check, because where a row sits says nothing about whether the server is real. `python scripts/validate.py --fix` sorts everything for you, and a maintainer runs it periodically anyway.
+
+## Quality standards
+
+Every submission must meet all of these. CI checks the mechanical ones automatically and reports the rest for a maintainer. A hosted server with no public source follows the [hosted servers](#hosted-servers) rules instead of standards 1, 2 and 4.
+
+1. **It really is an MCP server.** The repository contains a working [MCP](https://modelcontextprotocol.io/) implementation -- server, client, or framework, matching the section. A repository holding only a README and a registry manifest such as `server.json` is rejected.
+2. **Open source with a stated licence.** The repository must state its licence somewhere a reader can find it: a `LICENSE` file at its root, or a licence field in its package manifest (`package.json`, `pyproject.toml`, `Cargo.toml`, `pom.xml`, `composer.json`, `deno.json`). A root `LICENSE` file is what GitHub reads for the sidebar, so it is still the better option, and a manifest-only declaration gets flagged for a maintainer to read. If GitHub cannot classify the file -- the sidebar reads "unknown" and the API reports `NOASSERTION` -- that is not an automatic rejection either, but a maintainer will read the terms by hand. It is common for a vendor repo with a customised header and suspicious for a small one. No licence anywhere is a rejection, and so is a manifest field that withholds open-source terms instead of granting them: npm's `UNLICENSED`, `SEE LICENSE IN <file>`, or `Proprietary`.
+3. **Documented.** A README covering what it does, how to install and configure it, and basic usage.
+4. **Maintained.** Pushed within the last **180 days**, and not archived.
+5. **Runnable by someone else.** A reader should be able to follow your README and get the server working. That is the bar, not popularity: there is **no minimum star count and no minimum project age**. A three-day-old server with ten stars, a licence and clear setup instructions is a better entry than a famous repository nobody can configure.
+6. **Not a duplicate.** Not already listed, and not a second server for a product already covered. If yours is genuinely better than the listed one, say why in the pull request and propose replacing it.
+7. **Not a fork.** Submit the upstream project.
+
+Entries that stop meeting these get removed. A monthly [health workflow](.github/workflows/health.yml) posts dead links, archived projects, missing licences, stale entries, and hosted endpoints that stopped answering into a tracking issue.
+
+## Hosted servers
+
+A hosted MCP server whose source is not public can be listed too, with `Remote` in the Language column. With no source to read, the documentation and the endpoint carry the weight instead:
+
+1. **The link is the operator's own documentation.** A page on the operator's domain, or the README of a repository the operator owns. A registry or marketplace listing (Smithery, Glama, mcp.so and the like) is not documentation.
+2. **The documentation says how to connect.** It names the endpoint URL and how to authenticate, and says what the server's tools do, by name or as a list of what you can ask it for. Signing up or paying to get a key is fine; a reader just has to be able to follow it.
+3. **The endpoint answers.** CI finds the endpoint in the documentation and sends it an MCP `initialize`. Any HTTP answer counts, including the 401 a server gives a request with no token. A 404, a 410 or no answer at all does not.
+4. **It merges the same way as every other entry.** Once its author has starred the repository and the checks pass, it merges itself. Without a star it waits, marked `missing-star`, until its author stars or a maintainer merges it after reading the documentation.
+
+Standards 3, 5, 6 and 7 apply as written. The licence standard does not, since nothing is distributed, and neither does the 180-day push rule: a documentation repository can sit untouched while the service runs, so for a hosted server "maintained" means the endpoint still answers. A repository that is archived still disqualifies the entry.
+
+## What is not accepted
+
+Short list, and none of it is about how big your project is:
+
+- **Repositories with no implementation.** A README plus `server.json` or `glama.json` and nothing to run, listed under a programming language. Publish the source, link the repository that holds it, or, if the server is hosted, list it as `Remote` under the [hosted servers](#hosted-servers) rules.
+- **Undisclosed self-promotion.** Submitting your own work is welcome and common. Just tick the affiliation box.
+- **Nothing about how many servers you add at once.** One per pull request is preferred and CI will say so, but it does not fail the check, and a batch of genuinely good entries is not a reason to decline.
+- **Projects that are not really MCP servers**, where MCP is a passing mention in the README rather than something implemented.
+- **Hosted products without documentation of their own** that names the endpoint, the authentication and the tools, or whose endpoint does not answer. A registry listing on its own is not enough.
+- **Descriptions written as marketing copy.** Say what it does. This is usually a one-line fix, not a rejection.
+- **Changes that remove or reorder unrelated entries** alongside your addition.
+
+If a submission is declined it will say which of these applies and what would change the answer. "Too new" and "too few stars" are not on the list and will not be the reason.
+
+## Submitting your own project
+
+That is fine and normal -- much of this list exists because authors submitted their own work. Two requirements:
+
+1. **Disclose it.** Tick the affiliation box in the pull request template. That is all: the disclosure is not held against you, it just means nobody has to guess. Self-promotion that was hidden and later discovered gets the entry removed, which is the only reason this matters.
+2. **Meet the same bar as everyone else.** Licence, documentation, maintenance, real implementation. Being the author neither helps nor hurts.
+
+Being new is not a reason to hold back. If you would rather not open a pull request, the [server suggestion form](https://github.com/ATLURI0001/mcp-server-atlas/issues/new?template=add-server.yml) works just as well: for a server or a framework, a bot turns the form into the same one-row pull request, runs the same checks, and merges it when they pass. If a field breaks a rule it comments on the issue, and editing the issue retries. Use the form itself: an issue filed through the API arrives without the `addition` label, and the bot only starts once a maintainer adds it. Other sections are added by a maintainer.
+
+## Pull request process
+
+1. **One server per pull request, preferred.** It keeps review and revert independent. This is a preference, not a gate: CI notes the count and carries on, so a pull request adding several good entries still comes back green. A maintainer may still ask you to split a large one.
+2. Branch off `main`, add your row, and commit with a clear message such as `Add Acme MCP to Developer Tools`.
+3. Fill in the pull request template, including the affiliation question.
+4. Make sure all checks pass:
+   - **Validate format** -- structure, ordering, duplicates, description length
+   - **Check links** -- every URL resolves
+   - **Submission check** -- licence, maintenance, archived state, real implementation
+
+   On a pull request, **Validate format** only fails on problems your change
+   introduces. If `main` already has a bad row, it is listed for the record but
+   marked as pre-existing and does not count against you.
+5. **It merges itself once you have starred.** If your pull request only touches `README.md` or `CHANGELOG.md` and you have starred the repository, auto-merge is switched on for you: GitHub squash-merges it the moment every required check passes. No approval, no waiting for a maintainer to be awake. It will not merge while any required check is red, star or not.
+
+A maintainer still reads what lands, and may follow up if a description reads promotionally or it is unclear what the server does. Three things keep a pull request from merging itself:
+
+- **It touches anything beyond the list** -- a workflow, a script, a test, tooling config. Those change what the checks verify, so a person looks first.
+- **You have not starred the repository.** A star is required before a pull request merges itself. Without one it waits, marked `missing-star`, and starring releases it: the label comes off and it merges once the checks pass. A maintainer can also merge it by hand. A star never gets an entry past a failing check.
+- **It carries the `maintainer-override` label**, which bypasses the submission gate. That is a maintainer's judgement call, so whoever applied it merges by hand.
+
+Anyone can also stop auto-merge on a specific pull request by adding the `no-auto-merge` label.
+
+Maintainers can apply the `maintainer-override` label when a submission is genuinely fine but trips a threshold.
+
+### When you open it
+
+If you have not starred the repository, a bot adds the `missing-star` label and comments once to ask. A star is required before your pull request merges itself, so until you star it waits. The label comes off by itself when you do, the comment turns into a thank-you, and the pull request merges once the checks pass.
+
+### After it merges
+
+Within the hour, a bot comments once on your pull request (or on your issue, if you used the form) with a link to your entry on the [website](https://atluri0001.github.io/mcp-server-atlas/) and a badge for your project's README:
+
+```markdown
+[![Listed in MCP Server Atlas](https://atluri0001.github.io/mcp-server-atlas/badge.svg)](https://github.com/ATLURI0001/mcp-server-atlas)
+```
+
+The badge links back to the list, so people who find your server can find the others. The badge is optional. Edits to an existing entry, such as a reworded description, get no comment.
+
+## Running the checks locally
+
+```bash
+python scripts/validate.py
+```
+
+```bash
+python scripts/validate.py --fix
+```
+
+`--fix` repairs alphabetical order, table alignment, trailing whitespace, and dashes. Everything else -- an over-long description, a duplicate, an unknown category -- needs a real edit. It will not touch a file that still has merge conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`), because re-padding would mangle the table around them: resolve the conflict first. `validate.py` reports any marker left behind as an error.
+
+To preview the submission gate the way CI runs it:
+
+```bash
+GITHUB_TOKEN=$(gh auth token) python scripts/check_submission.py --base-ref origin/main
+```
+
+The link check needs [lychee](https://github.com/lycheeverse/lychee):
+
+```bash
+lychee --config lychee.toml README.md CONTRIBUTING.md
+```
+
+## Updating or removing an entry
+
+**Updating** -- open a pull request and explain what changed. Renames, moved repositories, and corrected descriptions are all welcome, and correcting someone else's entry is a genuinely useful contribution.
+
+**Removing** -- if a listed server is dead, archived, no longer implements MCP, or has become malicious, open an issue or a pull request that says which and why. Removals need a stated reason: people rely on this list, so entries are not dropped silently.
+
+## Reporting issues
+
+Use the [issue templates](https://github.com/ATLURI0001/mcp-server-atlas/issues/new/choose) to suggest a server, report a broken link, propose a category, or raise anything else.
+
+Found something on this list that behaves maliciously? That is a security matter -- see [SECURITY.md](SECURITY.md) and report it privately rather than in a public issue.
+
+## Code of Conduct
+
+This project follows the [Contributor Covenant Code of Conduct](CODE_OF_CONDUCT.md). By participating you agree to uphold it.
+
+---
+
+Thanks for helping keep this list worth reading.

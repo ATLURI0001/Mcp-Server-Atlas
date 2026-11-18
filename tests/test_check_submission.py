@@ -1,0 +1,727 @@
+"""Tests for scripts/check_submission.py.
+
+The two behaviours worth pinning are the ones a comment currently protects: that
+reordering a table is not read as a batch of new submissions, and that a licence
+declared only in a package manifest is recognised.
+"""
+
+from __future__ import annotations
+
+import base64
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pytest
+from conftest import commit_readme
+
+import check_submission
+
+ROW_A = "| [Alpha](https://github.com/acme/alpha) | Alpha widget | Go |"
+ROW_B = "| [Beta](https://github.com/acme/beta) | Beta widget | Go |"
+ROW_C = "| [Gamma](https://github.com/acme/gamma) | Gamma widget | Go |"
+
+
+# --- row parsing -------------------------------------------------------------
+
+
+def test_parse_rows_reads_name_url_and_columns():
+    rows = check_submission.parse_rows(ROW_A + "\n")
+
+    (sub,) = rows.values()
+    assert sub.name == "Alpha"
+    assert sub.url == "https://github.com/acme/alpha"
+    assert sub.desc == "Alpha widget"
+    assert sub.third == "Go"
+
+
+def test_parse_rows_is_independent_of_row_order():
+    """The invariant that lets added_rows() survive a re-sorted table."""
+    forward = check_submission.parse_rows(f"{ROW_A}\n{ROW_B}\n")
+    reversed_ = check_submission.parse_rows(f"{ROW_B}\n{ROW_A}\n")
+
+    assert set(forward) == set(reversed_)
+
+
+def test_parse_rows_normalises_trailing_slashes_and_case():
+    with_slash = check_submission.parse_rows(
+        "| [Alpha](https://github.com/Acme/Alpha/) | Alpha widget | Go |\n"
+    )
+
+    assert set(with_slash) == {"github.com/acme/alpha"}
+
+
+# --- added_rows against a real git history -----------------------------------
+
+
+@pytest.fixture
+def repo(git_repo: Path) -> Path:
+    """A base branch carrying two entry rows."""
+    commit_readme(git_repo, f"{ROW_A}\n{ROW_B}\n")
+    return git_repo
+
+
+def test_added_rows_ignores_a_reordered_table(repo: Path, monkeypatch):
+    (repo / "README.md").write_text(f"{ROW_B}\n{ROW_A}\n", encoding="utf-8")
+    monkeypatch.chdir(repo)
+
+    assert check_submission.added_rows("HEAD") == []
+
+
+def test_added_rows_reports_a_new_row(repo: Path, monkeypatch):
+    (repo / "README.md").write_text(f"{ROW_A}\n{ROW_B}\n{ROW_C}\n", encoding="utf-8")
+    monkeypatch.chdir(repo)
+
+    added = check_submission.added_rows("HEAD")
+
+    assert [sub.name for sub in added] == ["Gamma"]
+
+
+def test_added_rows_reports_one_row_when_a_table_is_both_sorted_and_extended(
+    repo: Path, monkeypatch
+):
+    (repo / "README.md").write_text(f"{ROW_C}\n{ROW_B}\n{ROW_A}\n", encoding="utf-8")
+    monkeypatch.chdir(repo)
+
+    added = check_submission.added_rows("HEAD")
+
+    assert [sub.name for sub in added] == ["Gamma"]
+
+
+# --- manifest licence detection ----------------------------------------------
+
+
+def _licence(filename: str, text: str) -> str | None:
+    return check_submission.parse_manifest_licence(filename, text)
+
+
+def test_package_json_licence_is_read():
+    assert (
+        _licence("package.json", '{\n  "name": "acme",\n  "license": "MIT"\n}') == "MIT"
+    )
+
+
+def test_package_json_legacy_object_licence_is_read():
+    manifest = '{"name": "acme", "license": {"type": "MIT", "url": "http://x/y"}}'
+
+    assert _licence("package.json", manifest) == "MIT"
+
+
+def test_composer_array_licence_is_read():
+    """CONTRIBUTING.md lists composer.json, which allows an array of licences."""
+    assert _licence("composer.json", '{"license": ["MIT", "GPL-3.0"]}') == "MIT"
+
+
+def test_pyproject_string_licence_is_read():
+    assert (
+        _licence("pyproject.toml", '[project]\nname = "acme"\nlicense = "Apache-2.0"\n')
+        == "Apache-2.0"
+    )
+
+
+def test_pyproject_table_licence_is_read():
+    """PEP 621's `license = {text = "..."}` form, which a text search misses."""
+    manifest = '[project]\nname = "acme"\nlicense = {text = "Apache-2.0"}\n'
+
+    assert _licence("pyproject.toml", manifest) == "Apache-2.0"
+
+
+def test_cargo_licence_is_read():
+    assert _licence("Cargo.toml", '[package]\nlicense = "MIT OR Apache-2.0"\n') == (
+        "MIT OR Apache-2.0"
+    )
+
+
+def test_licence_pointing_at_a_file_is_not_a_declaration():
+    """A file pointer names no terms, and GitHub already read the root files."""
+    manifest = '[project]\nname = "acme"\nlicense = {file = "LICENSE.txt"}\n'
+
+    assert _licence("pyproject.toml", manifest) is None
+
+
+def test_pom_xml_licence_is_read():
+    pom = "<licenses><license><name>MIT License</name></license></licenses>"
+
+    assert _licence("pom.xml", pom) == "MIT License"
+
+
+def test_manifest_without_a_licence_reads_as_none():
+    assert (
+        _licence("package.json", '{\n  "name": "acme",\n  "version": "1.0.0"\n}')
+        is None
+    )
+
+
+def test_a_nested_licence_key_is_not_read_as_the_packages_own():
+    """The reason this is parsed rather than pattern-matched."""
+    manifest = '{"name": "acme", "dependencies": {"dep": {"license": "MIT"}}}'
+
+    assert _licence("package.json", manifest) is None
+
+
+def test_unparseable_manifest_reads_as_none():
+    assert _licence("package.json", "{not json") is None
+    assert _licence("pyproject.toml", "[project") is None
+
+
+# --- open-source check on the declared value ---------------------------------
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "UNLICENSED",
+        "unlicensed",
+        "SEE LICENSE IN proprietary.txt",
+        "Proprietary",
+        "none",
+    ],
+)
+def test_a_field_that_withholds_open_source_terms_is_rejected(value: str):
+    assert check_submission.is_open_source(value) is False
+
+
+@pytest.mark.parametrize(
+    "value", ["MIT", "Apache-2.0", "Unlicense", "MIT OR Apache-2.0"]
+)
+def test_a_real_licence_is_accepted(value: str):
+    assert check_submission.is_open_source(value) is True
+
+
+# --- manifest_licence over the API -------------------------------------------
+
+
+def _fake_api(files: dict):
+    """Stand in for gh_api, serving base64 file contents for the paths given."""
+
+    def fake(path: str):
+        for name, text in files.items():
+            if path.endswith(f"/contents/{name}"):
+                content = base64.b64encode(text.encode("utf-8")).decode("ascii")
+                return {"content": content}, None
+        return None, 404
+
+    return fake
+
+
+def test_manifest_licence_returns_the_first_manifest_that_declares_one(monkeypatch):
+    monkeypatch.setattr(
+        check_submission,
+        "gh_api",
+        _fake_api(
+            {
+                "package.json": '{"name": "acme"}',
+                "pyproject.toml": '[project]\nlicense = {text = "Apache-2.0"}\n',
+            }
+        ),
+    )
+
+    assert check_submission.manifest_licence("acme/alpha") == (
+        "pyproject.toml",
+        "Apache-2.0",
+    )
+
+
+def test_manifest_licence_returns_nothing_when_no_manifest_exists(monkeypatch):
+    monkeypatch.setattr(check_submission, "gh_api", _fake_api({}))
+
+    assert check_submission.manifest_licence("acme/alpha") == (None, None)
+
+
+# --- inspect(), with the GitHub API stubbed ----------------------------------
+
+
+def _repo_api(files: dict):
+    """Serve a live, licence-less, MIT-free repository plus the given manifests."""
+    fresh = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    repo = {
+        "pushed_at": fresh,
+        "created_at": fresh,
+        "license": None,
+        "stargazers_count": 3,
+        "archived": False,
+        "fork": False,
+        "language": "TypeScript",
+    }
+    manifests = _fake_api(files)
+
+    def fake(path: str):
+        if path == "repos/acme/alpha":
+            return repo, None
+        if path == "repos/acme/alpha/license":
+            return None, 404
+        if path == "repos/acme/alpha/contents":
+            return [
+                {"name": "README.md", "type": "file"},
+                {"name": "src", "type": "dir"},
+            ], None
+        return manifests(path)
+
+    return fake
+
+
+def _inspected(files: dict, monkeypatch) -> check_submission.Submission:
+    monkeypatch.setattr(check_submission, "gh_api", _repo_api(files))
+    sub = check_submission.Submission(
+        name="Alpha",
+        url="https://github.com/acme/alpha",
+        desc="Alpha widget",
+        third="TypeScript",
+    )
+    check_submission.inspect(sub)
+    return sub
+
+
+def test_inspect_blocks_a_manifest_that_declares_unlicensed(monkeypatch):
+    """npm's marker for a package that is explicitly not open source."""
+    sub = _inspected({"package.json": '{"license": "UNLICENSED"}'}, monkeypatch)
+
+    assert any("UNLICENSED" in problem for problem in sub.hard)
+
+
+def test_inspect_blocks_a_manifest_that_points_at_proprietary_terms(monkeypatch):
+    sub = _inspected(
+        {"package.json": '{"license": "SEE LICENSE IN proprietary.txt"}'}, monkeypatch
+    )
+
+    assert sub.hard != []
+
+
+def test_inspect_accepts_a_manifest_licence_with_a_maintainer_note(monkeypatch):
+    sub = _inspected({"package.json": '{"license": "Apache-2.0"}'}, monkeypatch)
+
+    assert sub.hard == []
+    assert any("package.json" in note for note in sub.soft)
+    assert sub.facts["license"] == "Apache-2.0 (declared in package.json)"
+
+
+def test_inspect_blocks_a_repository_with_no_licence_anywhere(monkeypatch):
+    sub = _inspected({}, monkeypatch)
+
+    assert any("No licence anywhere" in problem for problem in sub.hard)
+
+
+# --- report rendering --------------------------------------------------------
+
+
+def test_render_blocks_on_a_hard_failure():
+    sub = check_submission.Submission(
+        name="Alpha",
+        url="https://github.com/acme/alpha",
+        desc="Alpha widget",
+        third="Go",
+    )
+    sub.hard.append("The repository is archived.")
+
+    report, failing = check_submission.render([sub], override=False)
+
+    assert failing is True
+    assert "Result: blocked." in report
+
+
+def test_render_honours_the_maintainer_override_label():
+    sub = check_submission.Submission(
+        name="Alpha",
+        url="https://github.com/acme/alpha",
+        desc="Alpha widget",
+        third="Go",
+    )
+    sub.hard.append("The repository is archived.")
+
+    report, failing = check_submission.render([sub], override=True)
+
+    assert failing is False
+    assert check_submission.OVERRIDE_LABEL in report
+
+
+def _clean_subs(*names):
+    return [
+        check_submission.Submission(
+            name=name, url=f"https://github.com/acme/{name}", desc="Widget", third="Go"
+        )
+        for name in names
+    ]
+
+
+def test_render_passes_several_entries_when_none_has_a_defect():
+    report, failing = check_submission.render(
+        _clean_subs("alpha", "beta"), override=False
+    )
+
+    assert failing is False
+    assert "Result: passed." in report
+
+
+def test_render_notes_the_entry_count_without_failing():
+    report, _ = check_submission.render(
+        _clean_subs("alpha", "beta", "gamma"), override=False
+    )
+
+    assert "adds 3 entries" in report
+    assert "does not fail this check" in report
+
+
+def test_render_omits_the_count_note_for_a_single_entry():
+    report, _ = check_submission.render(_clean_subs("alpha"), override=False)
+
+    assert "one server per" not in report
+
+
+def test_render_blocks_when_one_of_several_entries_has_a_defect():
+    subs = _clean_subs("alpha", "beta")
+    subs[1].hard.append("The repository is archived.")
+
+    report, failing = check_submission.render(subs, override=False)
+
+    assert failing is True
+    assert "1 blocking problem(s) across 2 entries" in report
+
+
+def test_render_passes_a_clean_single_entry():
+    sub = check_submission.Submission(
+        name="Alpha",
+        url="https://github.com/acme/alpha",
+        desc="Alpha widget",
+        third="Go",
+    )
+
+    report, failing = check_submission.render([sub], override=False)
+
+    assert failing is False
+    assert "Result: passed." in report
+
+
+# --- implementation detection -----------------------------------------------
+
+
+def _inspected_with_tree(
+    tree: list, monkeypatch, language: str = "TypeScript"
+) -> check_submission.Submission:
+    """Inspect a repository whose root contains exactly `tree`."""
+    fresh = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    def fake(path: str):
+        if path == "repos/acme/alpha":
+            return {
+                "pushed_at": fresh,
+                "created_at": fresh,
+                "license": {"spdx_id": "MIT"},
+                "stargazers_count": 0,
+                "archived": False,
+                "fork": False,
+                "language": None,
+            }, None
+        if path == "repos/acme/alpha/contents":
+            return tree, None
+        return None, 404
+
+    monkeypatch.setattr(check_submission, "gh_api", fake)
+    sub = check_submission.Submission(
+        name="Alpha",
+        url="https://github.com/acme/alpha",
+        desc="Alpha widget",
+        third=language,
+    )
+    check_submission.inspect(sub)
+    return sub
+
+
+def _stub_tree(extra: list) -> list:
+    """A README plus registry manifests, and nothing that implements anything."""
+    base = ["README.md", "LICENSE", "server.json", "mcp.json", "glama.json", "logo.png"]
+    return [{"name": n, "type": "file"} for n in base] + extra
+
+
+def test_manifest_only_repository_is_blocked(monkeypatch):
+    sub = _inspected_with_tree(_stub_tree([]), monkeypatch)
+
+    assert any("registry manifests" in problem for problem in sub.hard)
+
+
+def test_a_dotfile_does_not_rescue_a_manifest_only_repository(monkeypatch):
+    """A `.gitignore` used to break the subset test and let the stub through."""
+    sub = _inspected_with_tree(
+        _stub_tree([{"name": ".gitignore", "type": "file"}]), monkeypatch
+    )
+
+    assert any("registry manifests" in problem for problem in sub.hard)
+
+
+def test_a_dot_directory_does_not_count_as_source(monkeypatch):
+    """`.cursor-plugin` is tooling config, not somewhere an implementation lives."""
+    sub = _inspected_with_tree(
+        _stub_tree([{"name": ".cursor-plugin", "type": "dir"}]), monkeypatch
+    )
+
+    assert any("registry manifests" in problem for problem in sub.hard)
+
+
+def test_a_real_source_directory_clears_the_stub_check(monkeypatch):
+    sub = _inspected_with_tree(
+        _stub_tree([{"name": "src", "type": "dir"}]), monkeypatch
+    )
+
+    assert not any("registry manifests" in problem for problem in sub.hard)
+
+
+def test_a_build_manifest_clears_the_stub_check(monkeypatch):
+    sub = _inspected_with_tree(
+        _stub_tree([{"name": "package.json", "type": "file"}]), monkeypatch
+    )
+
+    assert not any("registry manifests" in problem for problem in sub.hard)
+
+
+def test_the_stub_message_points_a_hosted_server_at_remote(monkeypatch):
+    sub = _inspected_with_tree(_stub_tree([]), monkeypatch)
+
+    assert any("`Remote`" in problem for problem in sub.hard)
+
+
+# --- Remote entries ----------------------------------------------------------
+
+
+def _remote_api(repo: dict, files: dict):
+    """Serve one repository's metadata plus the README and files given."""
+    contents = _fake_api(files)
+
+    def fake(path: str):
+        if path == "repos/acme/alpha":
+            return repo, None
+        if path == "repos/acme/alpha/readme" and "README.md" in files:
+            return contents("repos/acme/alpha/contents/README.md")
+        return contents(path)
+
+    return fake
+
+
+def _remote(url: str = "https://github.com/acme/alpha") -> check_submission.Submission:
+    return check_submission.Submission(
+        name="Alpha", url=url, desc="Alpha widget", third="Remote"
+    )
+
+
+STALE_UNLICENSED = {
+    "pushed_at": "2020-01-01T00:00:00Z",
+    "created_at": "2020-01-01T00:00:00Z",
+    "license": None,
+    "stargazers_count": 0,
+    "archived": False,
+    "fork": False,
+    "language": None,
+}
+DOCS = "Connect to `https://mcp.acme.dev/mcp` with an API key.\n"
+
+
+def test_a_remote_stub_repository_waits_for_review_instead_of_failing(monkeypatch):
+    """A README and a server.json is what a hosted server's repository looks like."""
+    monkeypatch.setattr(
+        check_submission, "gh_api", _remote_api(STALE_UNLICENSED, {"README.md": DOCS})
+    )
+    monkeypatch.setattr(
+        check_submission, "probe", lambda url: (401, "application/json", "")
+    )
+    sub = _remote()
+
+    check_submission.inspect(sub)
+
+    assert sub.hard == []
+    assert check_submission.REMOTE_REVIEW in sub.soft
+    assert (
+        sub.facts["endpoint"] == "https://mcp.acme.dev/mcp (HTTP 401, application/json)"
+    )
+
+
+def test_an_archived_remote_repository_still_blocks(monkeypatch):
+    archived = STALE_UNLICENSED | {"archived": True}
+    monkeypatch.setattr(
+        check_submission, "gh_api", _remote_api(archived, {"README.md": DOCS})
+    )
+    monkeypatch.setattr(
+        check_submission, "probe", lambda url: (200, "text/event-stream", "")
+    )
+    sub = _remote()
+
+    check_submission.inspect(sub)
+
+    assert any("archived" in problem for problem in sub.hard)
+
+
+def test_a_remote_repository_without_a_readme_blocks(monkeypatch):
+    monkeypatch.setattr(check_submission, "gh_api", _remote_api(STALE_UNLICENSED, {}))
+    sub = _remote()
+
+    check_submission.inspect(sub)
+
+    assert any("No README" in problem for problem in sub.hard)
+
+
+def test_the_endpoint_can_come_from_server_json(monkeypatch):
+    manifest = '{"remotes": [{"type": "streamable-http", "url": "https://api.acme.dev/v1/mcp"}]}'
+    monkeypatch.setattr(
+        check_submission,
+        "gh_api",
+        _remote_api(
+            STALE_UNLICENSED, {"README.md": "Hosted.", "server.json": manifest}
+        ),
+    )
+    monkeypatch.setattr(
+        check_submission, "probe", lambda url: (200, "text/event-stream", "")
+    )
+    sub = _remote()
+
+    check_submission.inspect(sub)
+
+    assert sub.facts["endpoint"].startswith("https://api.acme.dev/v1/mcp")
+
+
+def test_a_remote_docs_page_is_read_for_its_endpoint(monkeypatch):
+    page = '<a href="https://mcp.acme.dev/sse">endpoint</a>'
+    monkeypatch.setattr(
+        check_submission,
+        "request",
+        lambda url, method="GET", read=False: (200, "text/html", page),
+    )
+    monkeypatch.setattr(check_submission, "probe", lambda url: (405, "text/plain", ""))
+    sub = _remote("https://acme.dev/docs/mcp")
+
+    check_submission.inspect(sub)
+
+    assert sub.facts["endpoint"] == "https://mcp.acme.dev/sse (HTTP 405, text/plain)"
+
+
+def test_an_endpoint_that_is_gone_is_reported(monkeypatch):
+    monkeypatch.setattr(check_submission, "probe", lambda url: (404, "text/plain", ""))
+    sub = _remote()
+
+    check_submission.check_endpoint(sub, DOCS)
+
+    assert any("answered like an MCP server" in note for note in sub.soft)
+    assert "endpoint" not in sub.facts
+
+
+def test_documentation_naming_no_endpoint_is_reported(monkeypatch):
+    sub = _remote()
+
+    check_submission.check_endpoint(sub, "Sign up on our website.")
+
+    assert any("No MCP endpoint URL found" in note for note in sub.soft)
+
+
+def test_find_endpoints_prefers_an_mcp_host():
+    text = "Docs at https://acme.dev/api/mcp and the server at https://mcp.acme.dev/v2."
+
+    assert check_submission.find_endpoints(text, "https://acme.dev/docs") == [
+        "https://mcp.acme.dev/v2",
+        "https://acme.dev/api/mcp",
+    ]
+
+
+def test_find_endpoints_expands_a_bare_mcp_host_to_the_usual_paths():
+    assert check_submission.find_endpoints(
+        "Connect to https://mcp.acme.dev", "https://acme.dev/docs"
+    ) == [
+        "https://mcp.acme.dev/mcp",
+        "https://mcp.acme.dev/sse",
+        "https://mcp.acme.dev",
+    ]
+
+
+def test_a_registry_on_an_mcp_domain_is_not_taken_for_an_endpoint_host():
+    text = "Listed on https://mcp.so/server/acme. Endpoint: https://acme.dev/api/mcp"
+
+    assert check_submission.find_endpoints(text, "https://acme.dev/docs") == [
+        "https://acme.dev/api/mcp"
+    ]
+
+
+def test_find_endpoints_ranks_an_api_path_above_another_docs_page():
+    text = "https://acme.dev/de/mcp https://acme.dev/fr/mcp https://acme.dev/api/mcp"
+
+    assert check_submission.find_endpoints(text, "https://acme.dev/en/mcp")[0] == (
+        "https://acme.dev/api/mcp"
+    )
+
+
+def test_find_endpoints_skips_the_entrys_own_page():
+    """A docs URL ending in /mcp is the documentation, not the endpoint."""
+    url = "https://docs.acme.dev/integrations/mcp/"
+
+    assert check_submission.find_endpoints(f"See {url}", url) == []
+
+
+def test_find_endpoints_drops_fragments():
+    """Clera's page linked `/mcp#application`, its own URL plus an anchor."""
+    text = "https://acme.dev/mcp#application https://mcp.acme.dev/mcp#tools"
+
+    assert check_submission.find_endpoints(text, "https://acme.dev/mcp") == [
+        "https://mcp.acme.dev/mcp"
+    ]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "https://{your-host}/mcp",
+        "https://mcp.example.com/mcp",
+        "https://localhost/mcp",
+        "https://127.0.0.1/mcp",
+        "https://acme.dev/pricing",
+    ],
+)
+def test_find_endpoints_ignores_placeholders_and_other_pages(text: str):
+    assert check_submission.find_endpoints(text, "https://acme.dev/docs") == []
+
+
+def test_probe_retries_a_post_only_404_as_a_get(monkeypatch):
+    calls = []
+
+    def fake(url, method="GET", read=False):
+        calls.append(method)
+        return (404, "", "") if method == "POST" else (200, "text/event-stream", "")
+
+    monkeypatch.setattr(check_submission, "request", fake)
+
+    assert check_submission.probe("https://mcp.acme.dev/sse")[0] == 200
+    assert calls == ["POST", "GET"]
+
+
+@pytest.mark.parametrize(
+    ("status", "ctype", "expected"),
+    [
+        (401, "application/json", True),
+        (200, "text/event-stream", True),
+        (200, "application/json", True),
+        (405, "text/html", True),
+        (200, "text/html", False),
+        (404, "application/json", False),
+        (None, "", False),
+    ],
+)
+def test_speaks_mcp(status, ctype: str, expected: bool):
+    assert check_submission.speaks_mcp(status, ctype) is expected
+
+
+def test_a_web_page_at_an_mcp_path_is_not_taken_for_the_endpoint(monkeypatch):
+    """Noveum's docs linked their own German copy at `/de/mcp`, which answers 200."""
+    monkeypatch.setattr(check_submission, "probe", lambda url: (200, "text/html", ""))
+    sub = _remote()
+
+    check_submission.check_endpoint(sub, DOCS)
+
+    assert "endpoint" not in sub.facts
+    assert any("text/html" in note for note in sub.soft)
+
+
+# --- exit code --------------------------------------------------------------
+
+
+def test_a_maintainer_note_does_not_fail_the_check(monkeypatch):
+    """Soft findings are for a person to read; only a hard one turns it red."""
+    sub = _remote()
+    sub.soft.append(check_submission.REMOTE_REVIEW)
+    monkeypatch.setattr(check_submission, "added_rows", lambda base: [sub])
+    monkeypatch.setattr(check_submission, "inspect", lambda sub: None)
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    monkeypatch.setattr("sys.argv", ["check_submission.py"])
+
+    assert check_submission.main() == 0
